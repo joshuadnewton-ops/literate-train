@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MMWD Manager - 16-bit Water District Simulation</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a2e;
+            font-family: 'Press Start 2P', cursive;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            overflow: auto;
+            padding: 20px;
+        }
+
+        #gameContainer {
+            background: #0f0f1e;
+            border: 8px solid #4a4a6a;
+            border-radius: 4px;
+            box-shadow: 0 0 30px rgba(106, 176, 255, 0.3);
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+        }
+
+        canvas {
+            display: block;
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+        }
+
+        #info {
+            color: #6ab0ff;
+            text-align: center;
+            margin-top: 20px;
+            font-size: 10px;
+            line-height: 1.8;
+        }
+    </style>
+</head>
+<body>
+    <div>
+        <div id="gameContainer">
+            <canvas id="gameCanvas" width="960" height="720"></canvas>
+        </div>
+        <div id="info">
+            Manage the Marin Municipal Water District<br>
+            Keep reservoirs full | Serve 191,000 customers | Balance budget
+        </div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // 16-bit color palette
+        const COLORS = {
+            sky: '#87CEEB',
+            darkSky: '#4a7ba7',
+            water: '#1e90ff',
+            darkWater: '#0066cc',
+            grass: '#4a9d2f',
+            darkGrass: '#2d5f1e',
+            mountain: '#8b7355',
+            darkMountain: '#5c4a36',
+            snow: '#ffffff',
+            ui: '#2a2a4a',
+            uiBorder: '#4a4a6a',
+            text: '#ffffff',
+            warning: '#ff6b6b',
+            good: '#51cf66',
+            gold: '#ffd700',
+            brown: '#8b4513',
+            darkBrown: '#5c2e0a'
+        };
+
+        // Game state
+        const game = {
+            month: 0, // 0-11 (Jan-Dec)
+            year: 2025,
+            budget: 50000000, // $50M starting budget
+            customers: 191000,
+            satisfaction: 80,
+            paused: false,
+            speed: 1, // months per second
+            tickTimer: 0,
+
+            // 7 actual MMWD reservoirs with factual total capacity (79,566 acre-feet)
+            reservoirs: [
+                { name: 'Alpine', capacity: 8890, current: 6200, x: 180, y: 200, active: true },
+                { name: 'Bon Tempe', capacity: 7630, current: 5500, x: 240, y: 220, active: true },
+                { name: 'Kent', capacity: 32680, current: 24000, x: 300, y: 190, active: true },
+                { name: 'Lagunitas', capacity: 8180, current: 6000, x: 360, y: 210, active: false },
+                { name: 'Phoenix', capacity: 2100, current: 1500, x: 420, y: 230, active: false },
+                { name: 'Nicasio', capacity: 22450, current: 16000, x: 540, y: 200, active: true },
+                { name: 'Soulajule', capacity: 7636, current: 5500, x: 620, y: 220, active: false }
+            ],
+
+            russianRiver: {
+                enabled: false,
+                monthlyCost: 800000,
+                supply: 2500 // acre-feet per month
+            },
+
+            conservation: {
+                turfConversion: { level: 0, cost: 2000000, savings: 350, active: false },
+                publicCampaign: { level: 0, cost: 500000, savings: 200, active: false },
+                rebateProgram: { level: 0, cost: 1500000, savings: 300, active: false }
+            },
+
+            events: [],
+            messages: [],
+
+            // Seasonal rainfall (acre-feet per month) - reflects California patterns
+            rainfallByMonth: [4500, 4000, 3500, 1200, 300, 100, 50, 50, 200, 800, 2500, 3800],
+
+            selectedReservoir: null,
+            mouseX: 0,
+            mouseY: 0,
+
+            buttons: []
+        };
+
+        // Calculate water demand (acre-feet per month)
+        function getWaterDemand() {
+            const baselineUsage = 6800; // ~82,000 acre-feet per year ÷ 12
+
+            // Higher demand in summer
+            const seasonalMultiplier = [0.8, 0.8, 0.9, 1.0, 1.2, 1.3, 1.4, 1.3, 1.2, 1.0, 0.9, 0.8];
+
+            // Conservation reduces demand
+            let conservationSavings = 0;
+            if (game.conservation.turfConversion.active) conservationSavings += game.conservation.turfConversion.savings;
+            if (game.conservation.publicCampaign.active) conservationSavings += game.conservation.publicCampaign.savings;
+            if (game.conservation.rebateProgram.active) conservationSavings += game.conservation.rebateProgram.savings;
+
+            return Math.max(0, baselineUsage * seasonalMultiplier[game.month] - conservationSavings);
+        }
+
+        // Get total reservoir water
+        function getTotalWater() {
+            return game.reservoirs.reduce((sum, r) => sum + r.current, 0);
+        }
+
+        // Get total active reservoir capacity
+        function getTotalCapacity() {
+            return game.reservoirs.reduce((sum, r) => sum + r.capacity, 0);
+        }
+
+        // Get active reservoir water (ones currently being used)
+        function getActiveWater() {
+            return game.reservoirs.filter(r => r.active).reduce((sum, r) => sum + r.current, 0);
+        }
+
+        // Month names
+        const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+        // Button class for 16-bit style buttons
+        class Button {
+            constructor(x, y, width, height, text, onClick, enabled = true) {
+                this.x = x;
+                this.y = y;
+                this.width = width;
+                this.height = height;
+                this.text = text;
+                this.onClick = onClick;
+                this.enabled = enabled;
+                this.hovered = false;
+            }
+
+            draw() {
+                const color = !this.enabled ? '#555' : this.hovered ? COLORS.good : COLORS.ui;
+
+                // Button background
+                ctx.fillStyle = color;
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+
+                // Border (3D effect)
+                ctx.strokeStyle = this.enabled && this.hovered ? COLORS.text : COLORS.uiBorder;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(this.x, this.y, this.width, this.height);
+
+                // Text
+                ctx.fillStyle = this.enabled ? COLORS.text : '#888';
+                ctx.font = '10px "Press Start 2P"';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(this.text, this.x + this.width / 2, this.y + this.height / 2);
+            }
+
+            contains(x, y) {
+                return x >= this.x && x <= this.x + this.width &&
+                       y >= this.y && y <= this.y + this.height;
+            }
+
+            click() {
+                if (this.enabled) {
+                    this.onClick();
+                }
+            }
+        }
+
+        // Initialize buttons
+        function initButtons() {
+            game.buttons = [
+                new Button(680, 40, 120, 35, game.paused ? 'PLAY' : 'PAUSE', () => {
+                    game.paused = !game.paused;
+                    game.buttons[0].text = game.paused ? 'PLAY' : 'PAUSE';
+                }),
+
+                new Button(820, 40, 120, 35, 'FAST', () => {
+                    game.speed = game.speed === 1 ? 3 : 1;
+                    game.buttons[1].text = game.speed === 1 ? 'FAST' : 'NORMAL';
+                }),
+
+                // Russian River toggle
+                new Button(680, 90, 260, 35,
+                    game.russianRiver.enabled ? 'RUS RIVER: ON' : 'RUS RIVER: OFF',
+                    () => {
+                        game.russianRiver.enabled = !game.russianRiver.enabled;
+                        game.buttons[2].text = game.russianRiver.enabled ? 'RUS RIVER: ON' : 'RUS RIVER: OFF';
+                        addMessage(game.russianRiver.enabled ?
+                            'Russian River supply activated' :
+                            'Russian River supply deactivated');
+                    }
+                ),
+
+                // Conservation programs
+                new Button(680, 380, 260, 30, 'TURF CONVERT $2M',
+                    () => {
+                        if (!game.conservation.turfConversion.active && game.budget >= game.conservation.turfConversion.cost) {
+                            game.budget -= game.conservation.turfConversion.cost;
+                            game.conservation.turfConversion.active = true;
+                            game.conservation.turfConversion.level++;
+                            addMessage('Turf conversion program launched!');
+                        }
+                    },
+                    () => !game.conservation.turfConversion.active && game.budget >= game.conservation.turfConversion.cost
+                ),
+
+                new Button(680, 420, 260, 30, 'PUBLIC CAMP $500K',
+                    () => {
+                        if (!game.conservation.publicCampaign.active && game.budget >= game.conservation.publicCampaign.cost) {
+                            game.budget -= game.conservation.publicCampaign.cost;
+                            game.conservation.publicCampaign.active = true;
+                            game.conservation.publicCampaign.level++;
+                            addMessage('Public awareness campaign started!');
+                        }
+                    },
+                    () => !game.conservation.publicCampaign.active && game.budget >= game.conservation.publicCampaign.cost
+                ),
+
+                new Button(680, 460, 260, 30, 'REBATE PROG $1.5M',
+                    () => {
+                        if (!game.conservation.rebateProgram.active && game.budget >= game.conservation.rebateProgram.cost) {
+                            game.budget -= game.conservation.rebateProgram.cost;
+                            game.conservation.rebateProgram.active = true;
+                            game.conservation.rebateProgram.level++;
+                            addMessage('Rebate program implemented!');
+                        }
+                    },
+                    () => !game.conservation.rebateProgram.active && game.budget >= game.conservation.rebateProgram.cost
+                )
+            ];
+        }
+
+        // Add message to message log
+        function addMessage(text) {
+            game.messages.unshift({ text, time: Date.now() });
+            if (game.messages.length > 5) {
+                game.messages.pop();
+            }
+        }
+
+        // Draw pixel-style mountains (Mt. Tamalpais)
+        function drawMountains() {
+            // Mt. Tam in background
+            ctx.fillStyle = COLORS.mountain;
+            ctx.beginPath();
+            ctx.moveTo(50, 280);
+            ctx.lineTo(200, 150);
+            ctx.lineTo(280, 190);
+            ctx.lineTo(350, 140);
+            ctx.lineTo(450, 200);
+            ctx.lineTo(550, 160);
+            ctx.lineTo(650, 240);
+            ctx.lineTo(650, 280);
+            ctx.closePath();
+            ctx.fill();
+
+            // Shading
+            ctx.fillStyle = COLORS.darkMountain;
+            ctx.beginPath();
+            ctx.moveTo(200, 150);
+            ctx.lineTo(240, 170);
+            ctx.lineTo(280, 190);
+            ctx.lineTo(240, 190);
+            ctx.closePath();
+            ctx.fill();
+
+            ctx.beginPath();
+            ctx.moveTo(350, 140);
+            ctx.lineTo(400, 170);
+            ctx.lineTo(450, 200);
+            ctx.lineTo(400, 200);
+            ctx.closePath();
+            ctx.fill();
+
+            // Snow peaks (pixel-style)
+            ctx.fillStyle = COLORS.snow;
+            ctx.fillRect(198, 150, 4, 4);
+            ctx.fillRect(348, 140, 4, 4);
+            ctx.fillRect(548, 160, 4, 4);
+        }
+
+        // Draw reservoir as pixel art
+        function drawReservoir(reservoir, index) {
+            const fillPercent = reservoir.current / reservoir.capacity;
+            const size = 35;
+            const reservoirHeight = 25;
+
+            // Reservoir bowl (brown/earth)
+            ctx.fillStyle = COLORS.brown;
+            ctx.fillRect(reservoir.x - size/2, reservoir.y, size, reservoirHeight);
+
+            ctx.fillStyle = COLORS.darkBrown;
+            ctx.fillRect(reservoir.x - size/2, reservoir.y, 4, reservoirHeight);
+            ctx.fillRect(reservoir.x + size/2 - 4, reservoir.y, 4, reservoirHeight);
+
+            // Water level
+            const waterHeight = reservoirHeight * fillPercent;
+            const waterColor = fillPercent < 0.3 ? COLORS.warning :
+                              fillPercent < 0.6 ? COLORS.gold : COLORS.water;
+
+            ctx.fillStyle = waterColor;
+            ctx.fillRect(reservoir.x - size/2 + 4, reservoir.y + reservoirHeight - waterHeight,
+                        size - 8, waterHeight);
+
+            // Water shimmer effect
+            if (fillPercent > 0) {
+                ctx.fillStyle = COLORS.sky;
+                ctx.fillRect(reservoir.x - size/2 + 6, reservoir.y + reservoirHeight - waterHeight + 2,
+                            8, 2);
+            }
+
+            // Active indicator
+            if (reservoir.active) {
+                ctx.fillStyle = COLORS.good;
+                ctx.fillRect(reservoir.x - size/2 - 8, reservoir.y + 8, 4, 4);
+            }
+
+            // Name label
+            ctx.fillStyle = COLORS.text;
+            ctx.font = '8px "Press Start 2P"';
+            ctx.textAlign = 'center';
+            ctx.fillText(reservoir.name, reservoir.x, reservoir.y + reservoirHeight + 12);
+
+            // Capacity bar
+            ctx.fillStyle = COLORS.uiBorder;
+            ctx.fillRect(reservoir.x - size/2, reservoir.y + reservoirHeight + 18, size, 4);
+            ctx.fillStyle = waterColor;
+            ctx.fillRect(reservoir.x - size/2, reservoir.y + reservoirHeight + 18, size * fillPercent, 4);
+
+            // Hover effect
+            const dist = Math.sqrt(Math.pow(game.mouseX - reservoir.x, 2) +
+                                  Math.pow(game.mouseY - (reservoir.y + reservoirHeight/2), 2));
+            if (dist < size) {
+                game.selectedReservoir = reservoir;
+                ctx.strokeStyle = COLORS.gold;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(reservoir.x - size/2 - 2, reservoir.y - 2, size + 4, reservoirHeight + 4);
+            }
+        }
+
+        // Draw UI panel
+        function drawUI() {
+            // Right panel background
+            ctx.fillStyle = COLORS.ui;
+            ctx.fillRect(660, 0, 300, 720);
+
+            // Border
+            ctx.strokeStyle = COLORS.uiBorder;
+            ctx.lineWidth = 4;
+            ctx.strokeRect(660, 0, 300, 720);
+
+            ctx.fillStyle = COLORS.text;
+            ctx.font = '12px "Press Start 2P"';
+            ctx.textAlign = 'left';
+
+            // Title
+            ctx.fillText('MMWD MANAGER', 680, 25);
+
+            // Date
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillText(`${monthNames[game.month]} ${game.year}`, 680, 140);
+
+            // Stats
+            let y = 170;
+            const lineHeight = 20;
+
+            const totalWater = getTotalWater();
+            const totalCapacity = getTotalCapacity();
+            const demand = getWaterDemand();
+            const waterPercent = (totalWater / totalCapacity * 100).toFixed(0);
+
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText('WATER SUPPLY', 680, y);
+            y += lineHeight;
+
+            ctx.font = '8px "Press Start 2P"';
+            const waterColor = waterPercent < 30 ? COLORS.warning :
+                              waterPercent < 60 ? COLORS.gold : COLORS.good;
+            ctx.fillStyle = waterColor;
+            ctx.fillText(`${Math.round(totalWater).toLocaleString()} AF`, 680, y);
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText(`${waterPercent}%`, 840, y);
+            y += lineHeight + 5;
+
+            // Budget
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText('BUDGET', 680, y);
+            y += lineHeight;
+
+            ctx.font = '8px "Press Start 2P"';
+            const budgetColor = game.budget < 10000000 ? COLORS.warning : COLORS.good;
+            ctx.fillStyle = budgetColor;
+            ctx.fillText(`$${(game.budget / 1000000).toFixed(1)}M`, 680, y);
+            y += lineHeight + 5;
+
+            // Customers
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText('SATISFACTION', 680, y);
+            y += lineHeight;
+
+            ctx.font = '8px "Press Start 2P"';
+            const satColor = game.satisfaction < 40 ? COLORS.warning :
+                            game.satisfaction < 70 ? COLORS.gold : COLORS.good;
+            ctx.fillStyle = satColor;
+            ctx.fillText(`${game.satisfaction}%`, 680, y);
+            ctx.fillStyle = COLORS.text;
+            ctx.fillText(`${game.customers.toLocaleString()} ppl`, 780, y);
+            y += lineHeight + 10;
+
+            // Conservation section
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillStyle = COLORS.gold;
+            ctx.fillText('CONSERVATION', 680, 360);
+
+            y = 510;
+            ctx.font = '8px "Press Start 2P"';
+            ctx.fillStyle = COLORS.text;
+
+            if (game.conservation.turfConversion.active) {
+                ctx.fillStyle = COLORS.good;
+                ctx.fillText('Turf: ACTIVE', 680, y);
+                ctx.fillStyle = COLORS.text;
+                ctx.fillText(`-${game.conservation.turfConversion.savings} AF/mo`, 800, y);
+                y += lineHeight;
+            }
+            if (game.conservation.publicCampaign.active) {
+                ctx.fillStyle = COLORS.good;
+                ctx.fillText('Campaign: ON', 680, y);
+                ctx.fillStyle = COLORS.text;
+                ctx.fillText(`-${game.conservation.publicCampaign.savings} AF/mo`, 800, y);
+                y += lineHeight;
+            }
+            if (game.conservation.rebateProgram.active) {
+                ctx.fillStyle = COLORS.good;
+                ctx.fillText('Rebates: ON', 680, y);
+                ctx.fillStyle = COLORS.text;
+                ctx.fillText(`-${game.conservation.rebateProgram.savings} AF/mo`, 800, y);
+                y += lineHeight;
+            }
+
+            // Messages
+            y = 560;
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillStyle = COLORS.gold;
+            ctx.fillText('MESSAGES', 680, y);
+
+            y += 20;
+            ctx.font = '7px "Press Start 2P"';
+            game.messages.forEach(msg => {
+                const age = Date.now() - msg.time;
+                const alpha = Math.max(0, 1 - age / 5000);
+                ctx.globalAlpha = alpha;
+                ctx.fillStyle = COLORS.text;
+
+                // Word wrap
+                const words = msg.text.split(' ');
+                let line = '';
+                words.forEach(word => {
+                    const testLine = line + word + ' ';
+                    const metrics = ctx.measureText(testLine);
+                    if (metrics.width > 250) {
+                        ctx.fillText(line, 680, y);
+                        y += 12;
+                        line = word + ' ';
+                    } else {
+                        line = testLine;
+                    }
+                });
+                ctx.fillText(line, 680, y);
+                y += 12;
+
+                ctx.globalAlpha = 1;
+            });
+
+            // Tooltip for hovered reservoir
+            if (game.selectedReservoir) {
+                const r = game.selectedReservoir;
+                y = 640;
+                ctx.font = '8px "Press Start 2P"';
+                ctx.fillStyle = COLORS.gold;
+                ctx.fillText(r.name.toUpperCase(), 680, y);
+                y += 15;
+                ctx.fillStyle = COLORS.text;
+                ctx.fillText(`${Math.round(r.current).toLocaleString()} /`, 680, y);
+                ctx.fillText(`${r.capacity.toLocaleString()} AF`, 680, y + 12);
+                ctx.fillText(`Status: ${r.active ? 'ACTIVE' : 'RESERVE'}`, 680, y + 24);
+            }
+        }
+
+        // Update game simulation
+        function updateGame(deltaTime) {
+            if (game.paused) return;
+
+            game.tickTimer += deltaTime * game.speed;
+
+            // Process month (1 month per second at normal speed)
+            if (game.tickTimer >= 1000) {
+                game.tickTimer = 0;
+                advanceMonth();
+            }
+        }
+
+        function advanceMonth() {
+            game.month++;
+            if (game.month >= 12) {
+                game.month = 0;
+                game.year++;
+            }
+
+            // Add rainfall to reservoirs
+            const rainfall = game.rainfallByMonth[game.month];
+            const rainfallPerReservoir = rainfall / 7;
+
+            game.reservoirs.forEach(r => {
+                r.current = Math.min(r.capacity, r.current + rainfallPerReservoir);
+            });
+
+            // Add Russian River supply
+            if (game.russianRiver.enabled) {
+                // Distribute Russian River water to active reservoirs
+                const activeReservoirs = game.reservoirs.filter(r => r.active);
+                const supplyPerReservoir = game.russianRiver.supply / activeReservoirs.length;
+                activeReservoirs.forEach(r => {
+                    r.current = Math.min(r.capacity, r.current + supplyPerReservoir);
+                });
+            }
+
+            // Calculate water demand
+            const demand = getWaterDemand();
+
+            // Use water from active reservoirs first
+            let remainingDemand = demand;
+            const activeReservoirs = game.reservoirs.filter(r => r.active);
+
+            activeReservoirs.forEach(r => {
+                if (remainingDemand > 0) {
+                    const used = Math.min(r.current, remainingDemand);
+                    r.current -= used;
+                    remainingDemand -= used;
+                }
+            });
+
+            // If still short, use reserve reservoirs
+            if (remainingDemand > 0) {
+                const reserveReservoirs = game.reservoirs.filter(r => !r.active);
+                reserveReservoirs.forEach(r => {
+                    if (remainingDemand > 0) {
+                        const used = Math.min(r.current, remainingDemand);
+                        r.current -= used;
+                        remainingDemand -= used;
+                    }
+                });
+
+                if (remainingDemand < demand * 0.5) {
+                    addMessage('Reserve reservoirs tapped!');
+                }
+            }
+
+            // Calculate satisfaction based on water shortage
+            if (remainingDemand > 0) {
+                const shortagePercent = (remainingDemand / demand) * 100;
+                game.satisfaction -= Math.ceil(shortagePercent / 5);
+                addMessage(`SHORTAGE! -${Math.ceil(shortagePercent)}% satisfaction`);
+            } else {
+                // Slowly recover satisfaction
+                game.satisfaction = Math.min(100, game.satisfaction + 1);
+            }
+
+            game.satisfaction = Math.max(0, game.satisfaction);
+
+            // Monthly revenue from customers
+            const monthlyRevenue = 4200000; // ~$50M per year / 12
+            game.budget += monthlyRevenue;
+
+            // Monthly costs
+            let monthlyCosts = 800000; // Base operations ($9.6M/year)
+
+            if (game.russianRiver.enabled) {
+                monthlyCosts += game.russianRiver.monthlyCost;
+            }
+
+            game.budget -= monthlyCosts;
+
+            // Random events
+            if (Math.random() < 0.05) {
+                triggerRandomEvent();
+            }
+
+            // Check for drought
+            const waterPercent = getTotalWater() / getTotalCapacity() * 100;
+            if (waterPercent < 30 && !game.events.includes('drought')) {
+                game.events.push('drought');
+                addMessage('DROUGHT WARNING! Conserve water!');
+                game.satisfaction -= 10;
+            } else if (waterPercent > 60 && game.events.includes('drought')) {
+                game.events = game.events.filter(e => e !== 'drought');
+                addMessage('Drought conditions easing');
+            }
+
+            // Game over check
+            if (game.budget < -10000000) {
+                addMessage('BANKRUPTCY! Game Over');
+                game.paused = true;
+            }
+
+            if (game.satisfaction < 10) {
+                addMessage('BOARD FIRED YOU! Game Over');
+                game.paused = true;
+            }
+        }
+
+        function triggerRandomEvent() {
+            const events = [
+                {
+                    name: 'pipe_break',
+                    message: 'Pipe burst! -$500K repair',
+                    effect: () => { game.budget -= 500000; }
+                },
+                {
+                    name: 'efficient_residents',
+                    message: 'Residents conserving! +5% satisfaction',
+                    effect: () => { game.satisfaction = Math.min(100, game.satisfaction + 5); }
+                },
+                {
+                    name: 'grant',
+                    message: 'State grant received! +$2M',
+                    effect: () => { game.budget += 2000000; }
+                },
+                {
+                    name: 'heat_wave',
+                    message: 'Heat wave! Demand surge',
+                    effect: () => {
+                        const demand = getWaterDemand() * 0.3;
+                        const activeReservoirs = game.reservoirs.filter(r => r.active);
+                        activeReservoirs.forEach(r => {
+                            r.current = Math.max(0, r.current - demand / activeReservoirs.length);
+                        });
+                    }
+                }
+            ];
+
+            const event = events[Math.floor(Math.random() * events.length)];
+            addMessage(event.message);
+            event.effect();
+        }
+
+        // Draw everything
+        function draw() {
+            // Sky
+            const gradient = ctx.createLinearGradient(0, 0, 0, 300);
+            gradient.addColorStop(0, COLORS.sky);
+            gradient.addColorStop(1, COLORS.darkSky);
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, 660, 720);
+
+            // Grass/hills
+            ctx.fillStyle = COLORS.grass;
+            ctx.fillRect(0, 280, 660, 440);
+
+            // Hills pattern
+            ctx.fillStyle = COLORS.darkGrass;
+            for (let i = 0; i < 660; i += 40) {
+                ctx.beginPath();
+                ctx.arc(i, 280, 20, 0, Math.PI, true);
+                ctx.fill();
+            }
+
+            // Mountains
+            drawMountains();
+
+            // Title
+            ctx.fillStyle = COLORS.text;
+            ctx.font = '20px "Press Start 2P"';
+            ctx.textAlign = 'center';
+            ctx.shadowColor = 'rgba(0,0,0,0.5)';
+            ctx.shadowBlur = 4;
+            ctx.fillText('MARIN WATER DISTRICT', 330, 50);
+            ctx.shadowBlur = 0;
+
+            // Subtitle
+            ctx.font = '10px "Press Start 2P"';
+            ctx.fillText('Est. 1912 - Serving 191,000 Customers', 330, 75);
+
+            // Reservoirs
+            game.selectedReservoir = null;
+            game.reservoirs.forEach((r, i) => drawReservoir(r, i));
+
+            // Stats overlay on main area
+            ctx.fillStyle = 'rgba(42, 42, 74, 0.9)';
+            ctx.fillRect(20, 320, 260, 90);
+            ctx.strokeStyle = COLORS.uiBorder;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(20, 320, 260, 90);
+
+            ctx.fillStyle = COLORS.text;
+            ctx.font = '10px "Press Start 2P"';
+            ctx.textAlign = 'left';
+            ctx.fillText('MONTHLY STATS', 30, 340);
+
+            ctx.font = '8px "Press Start 2P"';
+            const demand = getWaterDemand();
+            const rainfall = game.rainfallByMonth[game.month];
+
+            ctx.fillText(`Demand: ${Math.round(demand)} AF`, 30, 360);
+            ctx.fillText(`Rainfall: ${Math.round(rainfall)} AF`, 30, 375);
+
+            if (game.russianRiver.enabled) {
+                ctx.fillStyle = COLORS.good;
+                ctx.fillText(`Russian River: +${game.russianRiver.supply} AF`, 30, 390);
+            }
+
+            // UI Panel
+            drawUI();
+
+            // Update button states
+            game.buttons.forEach(btn => {
+                if (btn.text.includes('TURF')) {
+                    btn.enabled = !game.conservation.turfConversion.active &&
+                                 game.budget >= game.conservation.turfConversion.cost;
+                } else if (btn.text.includes('PUBLIC')) {
+                    btn.enabled = !game.conservation.publicCampaign.active &&
+                                 game.budget >= game.conservation.publicCampaign.cost;
+                } else if (btn.text.includes('REBATE')) {
+                    btn.enabled = !game.conservation.rebateProgram.active &&
+                                 game.budget >= game.conservation.rebateProgram.cost;
+                }
+            });
+
+            // Draw buttons
+            game.buttons.forEach(btn => btn.draw());
+        }
+
+        // Animation loop
+        let lastTime = 0;
+        function gameLoop(timestamp) {
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+
+            updateGame(deltaTime);
+            draw();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Mouse handling
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            game.mouseX = e.clientX - rect.left;
+            game.mouseY = e.clientY - rect.top;
+
+            // Update button hover states
+            game.buttons.forEach(btn => {
+                btn.hovered = btn.contains(game.mouseX, game.mouseY);
+            });
+        });
+
+        canvas.addEventListener('click', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Check button clicks
+            game.buttons.forEach(btn => {
+                if (btn.contains(x, y)) {
+                    btn.click();
+                }
+            });
+
+            // Check reservoir clicks (toggle active/reserve status)
+            game.reservoirs.forEach(r => {
+                const dist = Math.sqrt(Math.pow(x - r.x, 2) + Math.pow(y - (r.y + 12), 2));
+                if (dist < 20) {
+                    r.active = !r.active;
+                    addMessage(`${r.name}: ${r.active ? 'ACTIVE' : 'RESERVE'}`);
+                }
+            });
+        });
+
+        // Initialize and start
+        initButtons();
+        addMessage('Welcome to MMWD Manager!');
+        addMessage('Keep water above 30% capacity');
+        addMessage('Manage budget and satisfaction');
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
