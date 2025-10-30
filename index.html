@@ -94,6 +94,8 @@
             customers: 191000,
             satisfaction: 80,
             paused: false,
+            gameOver: false,
+            gameOverReason: '',
             speed: 1, // months per second
             tickTimer: 0,
 
@@ -212,6 +214,53 @@
             }
         }
 
+        // Restart game
+        function restartGame() {
+            game.month = 0;
+            game.year = 2025;
+            game.budget = 50000000;
+            game.satisfaction = 80;
+            game.paused = false;
+            game.gameOver = false;
+            game.gameOverReason = '';
+            game.speed = 1;
+            game.tickTimer = 0;
+
+            // Reset reservoirs
+            game.reservoirs[0].current = 6200;
+            game.reservoirs[1].current = 5500;
+            game.reservoirs[2].current = 24000;
+            game.reservoirs[3].current = 6000;
+            game.reservoirs[4].current = 1500;
+            game.reservoirs[5].current = 16000;
+            game.reservoirs[6].current = 5500;
+
+            game.reservoirs[0].active = true;
+            game.reservoirs[1].active = true;
+            game.reservoirs[2].active = true;
+            game.reservoirs[3].active = false;
+            game.reservoirs[4].active = false;
+            game.reservoirs[5].active = true;
+            game.reservoirs[6].active = false;
+
+            // Reset systems
+            game.russianRiver.enabled = false;
+            game.conservation.turfConversion.active = false;
+            game.conservation.turfConversion.level = 0;
+            game.conservation.publicCampaign.active = false;
+            game.conservation.publicCampaign.level = 0;
+            game.conservation.rebateProgram.active = false;
+            game.conservation.rebateProgram.level = 0;
+
+            game.events = [];
+            game.messages = [];
+
+            initButtons();
+            addMessage('Welcome to MMWD Manager!');
+            addMessage('Keep water above 30% capacity');
+            addMessage('Manage budget and satisfaction');
+        }
+
         // Initialize buttons
         function initButtons() {
             game.buttons = [
@@ -246,8 +295,7 @@
                             game.conservation.turfConversion.level++;
                             addMessage('Turf conversion program launched!');
                         }
-                    },
-                    () => !game.conservation.turfConversion.active && game.budget >= game.conservation.turfConversion.cost
+                    }
                 ),
 
                 new Button(680, 420, 260, 30, 'PUBLIC CAMP $500K',
@@ -258,8 +306,7 @@
                             game.conservation.publicCampaign.level++;
                             addMessage('Public awareness campaign started!');
                         }
-                    },
-                    () => !game.conservation.publicCampaign.active && game.budget >= game.conservation.publicCampaign.cost
+                    }
                 ),
 
                 new Button(680, 460, 260, 30, 'REBATE PROG $1.5M',
@@ -270,8 +317,7 @@
                             game.conservation.rebateProgram.level++;
                             addMessage('Rebate program implemented!');
                         }
-                    },
-                    () => !game.conservation.rebateProgram.active && game.budget >= game.conservation.rebateProgram.cost
+                    }
                 )
             ];
         }
@@ -567,10 +613,12 @@
             if (game.russianRiver.enabled) {
                 // Distribute Russian River water to active reservoirs
                 const activeReservoirs = game.reservoirs.filter(r => r.active);
-                const supplyPerReservoir = game.russianRiver.supply / activeReservoirs.length;
-                activeReservoirs.forEach(r => {
-                    r.current = Math.min(r.capacity, r.current + supplyPerReservoir);
-                });
+                if (activeReservoirs.length > 0) {
+                    const supplyPerReservoir = game.russianRiver.supply / activeReservoirs.length;
+                    activeReservoirs.forEach(r => {
+                        r.current = Math.min(r.capacity, r.current + supplyPerReservoir);
+                    });
+                }
             }
 
             // Calculate water demand
@@ -607,8 +655,9 @@
             // Calculate satisfaction based on water shortage
             if (remainingDemand > 0) {
                 const shortagePercent = (remainingDemand / demand) * 100;
-                game.satisfaction -= Math.ceil(shortagePercent / 5);
-                addMessage(`SHORTAGE! -${Math.ceil(shortagePercent)}% satisfaction`);
+                const satisfactionLoss = Math.ceil(shortagePercent / 5);
+                game.satisfaction -= satisfactionLoss;
+                addMessage(`SHORTAGE! -${satisfactionLoss} satisfaction`);
             } else {
                 // Slowly recover satisfaction
                 game.satisfaction = Math.min(100, game.satisfaction + 1);
@@ -649,11 +698,15 @@
             if (game.budget < -10000000) {
                 addMessage('BANKRUPTCY! Game Over');
                 game.paused = true;
+                game.gameOver = true;
+                game.gameOverReason = 'BANKRUPTCY!\nBudget fell below -$10M';
             }
 
             if (game.satisfaction < 10) {
                 addMessage('BOARD FIRED YOU! Game Over');
                 game.paused = true;
+                game.gameOver = true;
+                game.gameOverReason = 'FIRED BY BOARD!\nSatisfaction fell below 10%';
             }
         }
 
@@ -776,6 +829,45 @@
 
             // Draw buttons
             game.buttons.forEach(btn => btn.draw());
+
+            // Game over overlay
+            if (game.gameOver) {
+                // Dark overlay
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+                ctx.fillRect(0, 0, 960, 720);
+
+                // Game over box
+                ctx.fillStyle = COLORS.ui;
+                ctx.fillRect(180, 200, 600, 320);
+                ctx.strokeStyle = COLORS.warning;
+                ctx.lineWidth = 6;
+                ctx.strokeRect(180, 200, 600, 320);
+
+                // Title
+                ctx.fillStyle = COLORS.warning;
+                ctx.font = '32px "Press Start 2P"';
+                ctx.textAlign = 'center';
+                ctx.fillText('GAME OVER', 480, 260);
+
+                // Stats
+                ctx.fillStyle = COLORS.text;
+                ctx.font = '16px "Press Start 2P"';
+                ctx.fillText(`Survived: ${game.year - 2025} years, ${game.month} months`, 480, 310);
+
+                // Reason
+                ctx.font = '12px "Press Start 2P"';
+                const lines = game.gameOverReason.split('\n');
+                lines.forEach((line, i) => {
+                    ctx.fillText(line, 480, 350 + i * 25);
+                });
+
+                // Restart instructions
+                ctx.fillStyle = COLORS.gold;
+                ctx.font = '14px "Press Start 2P"';
+                ctx.fillText('Press SPACE to restart', 480, 450);
+                ctx.font = '10px "Press Start 2P"';
+                ctx.fillText('or press R', 480, 475);
+            }
         }
 
         // Animation loop
@@ -822,6 +914,14 @@
                     addMessage(`${r.name}: ${r.active ? 'ACTIVE' : 'RESERVE'}`);
                 }
             });
+        });
+
+        // Keyboard controls
+        document.addEventListener('keydown', (e) => {
+            if (game.gameOver && (e.code === 'Space' || e.key === 'r' || e.key === 'R')) {
+                e.preventDefault();
+                restartGame();
+            }
         });
 
         // Initialize and start
