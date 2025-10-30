@@ -112,9 +112,6 @@
 
         // Hex grid configuration
         const HEX_SIZE = 25;
-        const HEX_WIDTH = Math.sqrt(3) * HEX_SIZE;
-        const HEX_HEIGHT = 2 * HEX_SIZE;
-        const VERT_SPACING = HEX_HEIGHT * 0.75;
 
         // Lake information
         const LAKE_INFO = {
@@ -165,27 +162,43 @@
                 this.type = type;
                 this.lake = lake;
                 this.hover = false;
+                this.selected = false;
 
                 // Convert axial coordinates to pixel coordinates
                 this.x = HEX_SIZE * (Math.sqrt(3) * q + Math.sqrt(3)/2 * r) + 400;
                 this.y = HEX_SIZE * (3/2 * r) + 300;
+
+                // Cache forest texture positions to prevent flickering
+                if (this.type === TILE_TYPES.FOREST) {
+                    this.forestTexture = [];
+                    for (let i = 0; i < 3; i++) {
+                        this.forestTexture.push({
+                            x: (Math.random() - 0.5) * HEX_SIZE * 0.6,
+                            y: (Math.random() - 0.5) * HEX_SIZE * 0.6
+                        });
+                    }
+                }
+
+                // Cache hexagon vertices for optimized rendering
+                this.vertices = [];
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i;
+                    this.vertices.push({
+                        x: HEX_SIZE * Math.cos(angle),
+                        y: HEX_SIZE * Math.sin(angle)
+                    });
+                }
             }
 
             draw() {
                 ctx.save();
                 ctx.translate(this.x, this.y);
 
-                // Draw hexagon
+                // Draw hexagon using cached vertices
                 ctx.beginPath();
-                for (let i = 0; i < 6; i++) {
-                    const angle = (Math.PI / 3) * i;
-                    const x = HEX_SIZE * Math.cos(angle);
-                    const y = HEX_SIZE * Math.sin(angle);
-                    if (i === 0) {
-                        ctx.moveTo(x, y);
-                    } else {
-                        ctx.lineTo(x, y);
-                    }
+                ctx.moveTo(this.vertices[0].x, this.vertices[0].y);
+                for (let i = 1; i < 6; i++) {
+                    ctx.lineTo(this.vertices[i].x, this.vertices[i].y);
                 }
                 ctx.closePath();
 
@@ -218,17 +231,18 @@
                 ctx.fillStyle = fillColor;
                 ctx.fill();
 
-                // Border
-                ctx.strokeStyle = this.hover ? COLORS.highlight : 'rgba(0, 0, 0, 0.3)';
-                ctx.lineWidth = this.hover ? 3 : 1;
-                ctx.stroke();
-
-                // Highlight selected
-                if (this.hover) {
-                    ctx.strokeStyle = COLORS.highlight;
+                // Border - show selected state (thicker blue) or hover state (gold) or default
+                if (this.selected) {
+                    ctx.strokeStyle = '#00bfff'; // Deep sky blue for selected
+                    ctx.lineWidth = 4;
+                } else if (this.hover) {
+                    ctx.strokeStyle = COLORS.highlight; // Gold for hover
                     ctx.lineWidth = 3;
-                    ctx.stroke();
+                } else {
+                    ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)'; // Default subtle border
+                    ctx.lineWidth = 1;
                 }
+                ctx.stroke();
 
                 // Add texture for water tiles
                 if (this.type === TILE_TYPES.WATER || this.type === TILE_TYPES.DEEP_WATER) {
@@ -236,13 +250,11 @@
                     ctx.fillRect(-HEX_SIZE/3, -2, HEX_SIZE/2, 2);
                 }
 
-                // Add texture for forest
-                if (this.type === TILE_TYPES.FOREST) {
+                // Add texture for forest using cached positions
+                if (this.type === TILE_TYPES.FOREST && this.forestTexture) {
                     ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
-                    for (let i = 0; i < 3; i++) {
-                        const px = (Math.random() - 0.5) * HEX_SIZE * 0.6;
-                        const py = (Math.random() - 0.5) * HEX_SIZE * 0.6;
-                        ctx.fillRect(px, py, 3, 3);
+                    for (const pos of this.forestTexture) {
+                        ctx.fillRect(pos.x, pos.y, 3, 3);
                     }
                 }
 
@@ -250,9 +262,34 @@
             }
 
             containsPoint(x, y) {
+                // Proper point-in-hexagon detection for pointy-top hexagons
                 const dx = x - this.x;
                 const dy = y - this.y;
-                return Math.abs(dx) < HEX_SIZE && Math.abs(dy) < HEX_SIZE;
+
+                // Convert to axial coordinates
+                const q = (Math.sqrt(3)/3 * dx - 1/3 * dy) / HEX_SIZE;
+                const r = (2/3 * dy) / HEX_SIZE;
+
+                // Convert to cube coordinates
+                const s = -q - r;
+
+                // Round to nearest hex
+                let rq = Math.round(q);
+                let rr = Math.round(r);
+                let rs = Math.round(s);
+
+                const q_diff = Math.abs(rq - q);
+                const r_diff = Math.abs(rr - r);
+                const s_diff = Math.abs(rs - s);
+
+                if (q_diff > r_diff && q_diff > s_diff) {
+                    rq = -rr - rs;
+                } else if (r_diff > s_diff) {
+                    rr = -rq - rs;
+                }
+
+                // Check if the rounded coordinates match this hex's coordinates
+                return rq === this.q && rr === this.r;
             }
 
             getInfo() {
@@ -478,12 +515,21 @@
             const x = e.clientX - rect.left;
             const y = e.clientY - rect.top;
 
+            // Clear previous selection
+            hexMap.forEach(tile => {
+                tile.selected = false;
+            });
+
+            // Set new selection
             hexMap.forEach(tile => {
                 if (tile.containsPoint(x, y)) {
                     selectedHex = tile;
+                    tile.selected = true;
                     updateInfoPanel(tile);
                 }
             });
+
+            draw();
         });
 
         // Initialize
